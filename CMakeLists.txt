@@ -111,6 +111,7 @@ if(MSVC)
     endif()
 endif()
 
+find_package(CUDAToolkit)
 find_package(CUDA)
 if(CUDA_FOUND)
     set(CUB_ROOT_DIR "${PROJECT_SOURCE_DIR}/tools/cub")

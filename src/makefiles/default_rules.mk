@@ -129,29 +129,37 @@ valgrind: .valgrind
 	rm valgrind.out
 	touch .valgrind
 
-
-#buid up dependency commands
+# Build up dependency commands.
 CC_SRCS=$(wildcard *.cc)
-#check if files exist to run dependency commands on
+# Check if any .cc sources exist to run dependency commands on.
 ifneq ($(CC_SRCS),)
 CC_DEP_COMMAND=$(CXX) -M $(CXXFLAGS) $(CC_SRCS)
 endif
 
-ifeq ($(CUDA), true)
+ifeq ($(IS_GPU_BUILD), true)
 CUDA_SRCS=$(wildcard *.cu)
-#check if files exist to run dependency commands on
+# Check if any CUDA .cu sources exist to run dependency commands on.
 ifneq ($(CUDA_SRCS),)
+ifeq ($(CUDA), true)
 NVCC_DEP_COMMAND = $(CUDATKDIR)/bin/nvcc -M $(CUDA_FLAGS) $(CUDA_INCLUDE) $(CUDA_SRCS)
+endif
+ifeq ($(ROCM), true)
+HIPCC_DEP_COMMAND = $(HIPCC) -M $(ROCM_FLAGS) $(ROCM_INCLUDE) $(CUDA_SRCS)
+endif
 endif
 endif
 
+.PHONY: depend
 depend:
 	rm -f .depend.mk
 ifneq ($(CC_DEP_COMMAND),)
-	$(CC_DEP_COMMAND) >> .depend.mk
+	-$(CC_DEP_COMMAND) >> .depend.mk
 endif
 ifneq ($(NVCC_DEP_COMMAND),)
-	$(NVCC_DEP_COMMAND) >> .depend.mk
+	-$(NVCC_DEP_COMMAND) >> .depend.mk
+endif
+ifneq ($(HIPCC_DEP_COMMAND),)
+	-$(HIPCC_DEP_COMMAND) >> .depend.mk
 endif
 
 # removing automatic making of "depend" as it's quite slow.

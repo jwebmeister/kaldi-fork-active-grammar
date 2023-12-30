@@ -65,7 +65,7 @@ int main(int argc, char *argv[]) {
       exit(1);
     }
 
-#if HAVE_CUDA==1
+#if HAVE_CUDA
     CuDevice::Instantiate().SelectGpuId(use_gpu);
 #endif
 

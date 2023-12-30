@@ -139,7 +139,7 @@ int main(int argc, char *argv[]) {
       exit(1);
     }
 
-#if HAVE_CUDA==1
+#if HAVE_CUDA
     CuDevice::Instantiate().SelectGpuId(use_gpu);
 #endif
 
@@ -209,7 +209,7 @@ int main(int argc, char *argv[]) {
     if (HasBatchnorm(nnet))
       RecomputeStats2(egs, chain_config, model, &best_nnet);
 
-#if HAVE_CUDA==1
+#if HAVE_CUDA
     CuDevice::Instantiate().PrintProfile();
 #endif
 

@@ -225,13 +225,16 @@ class CMakeListsLibrary(object):
             self.source_list.append("${CUDA_OBJS}")
             ret.append("if(CUDA_FOUND)")
             ret.append("    cuda_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)")
-            ret.append("    cuda_compile(CUDA_OBJS")
+            ret.append("    cuda_compile(CUDA_OBJS SHARED")
             for f in self.cuda_source_list:
                 ret.append("        " + f)
             ret.append("    )")
             ret.append("endif()\n")
 
-        ret.append("add_library(" + self.target_name)
+        add_lib_line = "add_library(" + self.target_name
+        if self.is_shared:
+            add_lib_line += " SHARED"
+        ret.append(add_lib_line)
         for f in self.source_list:
             ret.append("    " + f)
         ret.append(")\n")

@@ -3,8 +3,14 @@ all:
 EXTRA_CXXFLAGS = -Wno-sign-compare
 include ../kaldi.mk
 
+ifeq ($(CUDA), true)
 LDFLAGS += $(CUDA_LDFLAGS)
 LDLIBS += $(CUDA_LDLIBS)
+endif
+ifeq ($(ROCM), true)
+LDFLAGS += $(ROCM_LDFLAGS)
+LDLIBS += $(ROCM_LDLIBS)
+endif
 
 BINFILES = nnet3-init nnet3-info nnet3-get-egs nnet3-copy-egs nnet3-subset-egs \
    nnet3-shuffle-egs nnet3-acc-lda-stats nnet3-merge-egs \
@@ -31,9 +37,10 @@ cuda-compiled.o: ../kaldi.mk
 TESTFILES =
 
 ADDLIBS = ../nnet3/kaldi-nnet3.a ../chain/kaldi-chain.a \
+          ../nnet2/kaldi-nnet2.a ../online2/kaldi-online2.a \
           ../cudamatrix/kaldi-cudamatrix.a ../decoder/kaldi-decoder.a \
-          ../lat/kaldi-lat.a ../fstext/kaldi-fstext.a ../hmm/kaldi-hmm.a \
-          ../transform/kaldi-transform.a ../gmm/kaldi-gmm.a \
+          ../lat/kaldi-lat.a ../fstext/kaldi-fstext.a ../hmm/kaldi-hmm.a ../feat/kaldi-feat.a \
+          ../transform/kaldi-transform.a ../ivector/kaldi-ivector.a ../gmm/kaldi-gmm.a \
           ../tree/kaldi-tree.a ../util/kaldi-util.a ../matrix/kaldi-matrix.a \
           ../base/kaldi-base.a
 

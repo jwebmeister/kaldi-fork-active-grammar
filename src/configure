@@ -74,6 +74,9 @@ Configuration options:
   --cudatk-dir=DIR      CUDA toolkit directory
   --cuda-arch=FLAGS     Override the default CUDA_ARCH flags. See:
          https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#nvcc-examples.
+  --use-rocm            Build with ROCm
+  --rocm-dir=DIR        ROCM directory
+  --rocm-targets=TGTS   Comma separated list of GPU targets to target through ROCm
   --debug-level=N       Use assertion level 0 (disabled), 1, or 2 [default=1]
   --double-precision    Build with BaseFloat set to double if yes [default=no],
                         mostly useful for testing purposes.
@@ -257,6 +260,70 @@ function linux_configure_mkllibdir {
   fi
 }
 
+# ROCM is used only in selected directories including src/cudamatrix, src/nnet*
+# and src/chain*. It is used to accelerate the neural network training.
+# The rest of Kaldi runs on CPUs.
+
+function configure_rocm {
+  # Check for ROCM in the system
+  if [ ! -d "$ROCMDIR" ]; then
+    for base in $ROCM_PATH /opt/rocm /usr/local/rocm /usr/; do
+      if [ -f $base/bin/hipcc ] && [ -f $base/bin/hipconfig ]; then
+        ROCMDIR=$base
+        break
+      fi
+    done
+  fi
+
+  if [ -d "$ROCMDIR" ]; then
+    if [ ! -f $ROCMDIR/bin/hipcc ]; then
+      failure "Cannnot find hipcc and hipconfig in ROCm directory $ROCMDIR"
+    fi
+  fi
+  echo "Using ROCm $ROCMDIR (hipcc compiler and runtime libraries)"
+  echo >> kaldi.mk
+  echo "# ROCm configuration" >> kaldi.mk
+  echo >> kaldi.mk
+  echo IS_GPU_BUILD = true >> kaldi.mk
+  echo ROCM = true >> kaldi.mk
+  echo "ROCMDIR = $ROCMDIR" >> kaldi.mk
+  echo "HIPCC = $ROCMDIR/bin/hipcc" >> kaldi.mk 
+
+  echo "CUDA_ARCH = " >> kaldi.mk
+  echo "ROCM_ARCH_FLAGS = " >> kaldi.mk
+  for i in ${ROCM_TARGETS//,/ } ; do
+    echo "Targetting ROCm arch $i"
+    echo "ROCM_ARCH_FLAGS += --offload-arch=$i" >> kaldi.mk
+  done
+  
+  echo "HOST_ARCH = `uname -m`" >> kaldi.mk
+  echo >> kaldi.mk
+  
+  ROCM_MAJOR_VERSION=$(hipconfig -v | cut -d. -f1)
+  echo "ROCM_MAJOR_VERSION = $ROCM_MAJOR_VERSION" >> kaldi.mk
+  ROCM_MINOR_VERSION=$(hipconfig -v | cut -d. -f2)
+  echo "ROCM_MINOR_VERSION = $ROCM_MINOR_VERSION" >> kaldi.mk
+  
+  # Only ROCm 5.2+ is supported.
+  if [ $ROCM_MAJOR_VERSION -eq 5 ] && [ $ROCM_MINOR_VERSION -lt 2 ] || [ $ROCM_MAJOR_VERSION -lt 5 ] ; then
+    echo "\
+WARNING: ROCm $ROCM_MAJOR_VERSION.$ROCM_MINOR_VERSION found but ROCm 5.2 or above is required."
+    exit 1;
+  fi
+  
+  # 64bit/32bit? Not Linux? We do not support cross compilation with ROCm so, 
+  # use direct calls to uname -m here
+  if [ "`uname -m`" == "x86_64" ] && [ "`uname`" == "Linux" ] ; then
+    cat makefiles/hip_64bit.mk >> kaldi.mk
+  else
+    echo "\
+WARNING: ROCm will not be used!
+         ROCm is only supported with 64-bit Linux builds."
+    exit 1;
+  fi
+}
+
+
 function linux_configure_mkl_includes {
   test -d $1/include && echo "$1/include" && return;
   test -d $2/../../include && echo "$2/../../include" && return;
@@ -405,7 +472,7 @@ function linux_configure_mkl_threading {
 
 function configure_cuda {
   # Check for CUDA toolkit in the system
-  if [ ! -d  "$CUDATKDIR" ]; then
+  if [ ! -d "$CUDATKDIR" ]; then
     for base in /usr/local/share/cuda /usr/local/cuda /usr/; do
       if [ -f $base/bin/nvcc ]; then
         CUDATKDIR=$base
@@ -423,79 +490,105 @@ function configure_cuda {
     fi
 
     # Determine 'CUDA_ARCH',
-    CUDA_VERSION=$($CUDATKDIR/bin/nvcc -V | tr '.,' '_ ' | awk '/release/{sub(/.*release/,""); print $1;}') # MAJOR_MINOR,
-    if [ -z "$CUDA_VERSION" ] ; then
-      echo "Cannot figure out CUDA_VERSION from the nvcc output. Either your CUDA is too new or too old."
-      exit 1
-    fi
+    CUDA_VERSION=$($CUDATKDIR/bin/nvcc -V | tr '.,' '_ ' |
+                     awk '/release/{sub(/.*release/,""); print $1;}') # MAJOR_MINOR,
+    [[ $CUDA_VERSION ]] ||
+      failure "Cannot figure out CUDA version from the nvcc output.
+Either your CUDA is too new or too old."
 
     COMPILER_VER_INFO=$($CXX --version 2>/dev/null)
-    if [[ $COMPILER_VER_INFO == *"g++"* ]]; then
-      GCC_VER=$($COMPILER -dumpversion)
+    if [[ $COMPILER_VER_INFO == *[gc]"++"* ]]; then
+      GCC_VER=$($CXX -dumpversion)
       GCC_VER_NUM=$(echo $GCC_VER | sed 's/\./ /g' | xargs printf "%d%02d%02d")
       case $CUDA_VERSION in
-        7_*)
-          MIN_UNSUPPORTED_GCC_VER="5.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=50000;
-          CUSOLVER=false
-        ;;
-        8_*)
-          MIN_UNSUPPORTED_GCC_VER="6.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=60000;
-          CUSOLVER=false
-        ;;
-        9_0)
+        # Update this list by consulting https://gist.github.com/ax3l/9489132
+        # Disabling CUDA 7 and CUDA 8 because we now use C++14 to compile CUDA
+        # code. It is still possible to use those cuda versions by switching
+        # back to C++11 in src/makefiles/cuda_64bit.mk and use CUB <= 1.8.0.
+        # See tools/ and https://github.com/kaldi-asr/kaldi/pull/4242
+        #7_*)
+        #  MIN_UNSUPPORTED_GCC_VER="5.0"
+        #  MIN_UNSUPPORTED_GCC_VER_NUM=50000;
+        #;;
+        #8_*)
+        #  MIN_UNSUPPORTED_GCC_VER="6.0"
+        #  MIN_UNSUPPORTED_GCC_VER_NUM=60000;
+        #;;
+        [1-8]_*)
+          failure "CUDA version $CUDA_VERSION is too old and unsupported."
+          ;;
+        9_[01])
           MIN_UNSUPPORTED_GCC_VER="7.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=70000;
-          CUSOLVER=false
-        ;;
-        9_1)
-          MIN_UNSUPPORTED_GCC_VER="7.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=70000;
-          CUSOLVER=true
-        ;;
-        9_2 | 9_* | 10_0)
+          MIN_UNSUPPORTED_GCC_VER_NUM=70000
+          ;;
+        9_* | 10_0)
           MIN_UNSUPPORTED_GCC_VER="8.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=80000;
+          MIN_UNSUPPORTED_GCC_VER_NUM=80000
+          ;;
+        10_*)
+          MIN_UNSUPPORTED_GCC_VER="9.0"
+          MIN_UNSUPPORTED_GCC_VER_NUM=90000
+          ;;
+        11_[0-3])
+          MIN_UNSUPPORTED_GCC_VER="10.0"
+          MIN_UNSUPPORTED_GCC_VER_NUM=100000
+          ;;
+        11_*)
+          MIN_UNSUPPORTED_GCC_VER="12.0"
+          MIN_UNSUPPORTED_GCC_VER_NUM=120000
           CUSOLVER=true
         ;;
-        10_1 | 10_*)
-          MIN_UNSUPPORTED_GCC_VER="9.0"
-          MIN_UNSUPPORTED_GCC_VER_NUM=90000;
+        12_*)
+          MIN_UNSUPPORTED_GCC_VER="12.2"
+          MIN_UNSUPPORTED_GCC_VER_NUM=122000
           CUSOLVER=true
         ;;
         *)
-          echo "Unsupported CUDA_VERSION (CUDA_VERSION=$CUDA_VERSION), please report it to Kaldi mailing list, together with 'nvcc -h' or 'ptxas -h' which lists allowed -gencode values..."; exit 1;
-        ;;
+          failure "Unsupported CUDA version ${CUDA_VERSION}.
+Please open an issue at https://github.com/kaldi-asr/kaldi/issues and include\
+ output of either 'nvcc -h' or 'ptxas -h'."
+          ;;
       esac
-      if [ $GCC_VER_NUM -ge $MIN_UNSUPPORTED_GCC_VER_NUM ]; then
-        failure "CUDA $CUDA_VERSION does not support $CXX (g++-$GCC_VER).
-                 You need g++ < $MIN_UNSUPPORTED_GCC_VER."
-      fi
+      (( GCC_VER_NUM < MIN_UNSUPPORTED_GCC_VER_NUM )) ||
+        failure "CUDA $CUDA_VERSION does not support $CXX (g++-$GCC_VER).\
+ Only versions strictly older than $MIN_UNSUPPORTED_GCC_VER are supported."
+
+      case $CUDA_VERSION in
+        [1-8]_* | 9_0) CUSOLVER=false ;;
+        *) CUSOLVER=true ;;
+      esac
     fi
 
-    if [ -z "$CUDA_ARCH" ]; then
+    if [[ ! $CUDA_ARCH ]]; then
       case `uname -m` in
-        x86_64|ppc64le)
+        x86_64 | ppc64le)
           case $CUDA_VERSION in
-            5_5) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35" ;;
-            6_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50" ;;
-            7_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52" ;;
-            8_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61" ;;
+            # Disabling CUDA 7 and 8. See a few lines above for details.
+            #7_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52" ;;
+            #8_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61" ;;
             9_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70" ;;
             10_*) CUDA_ARCH="-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75" ;;
-            *) echo "Unsupported CUDA_VERSION (CUDA_VERSION=$CUDA_VERSION), please report it to Kaldi mailing list, together with 'nvcc -h' or 'ptxas -h' which lists allowed -gencode values..."; exit 1 ;;
+            11_0) CUDA_ARCH="-gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80" ;;
+            11_*) CUDA_ARCH="-gencode arch=compute_35,code=sm_35 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86" ;;
+            12_*) CUDA_ARCH="-gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_90,code=sm_90" ;;
+            *) failure \
+                 "Unsupported CUDA version ${CUDA_VERSION}. Please open an" \
+                 "issue at https://github.com/kaldi-asr/kaldi/issues and" \
+                 "include output of either 'nvcc -h' or 'ptxas -h'."
           esac
         ;;
         aarch64)
           case $CUDA_VERSION in
-            7_*)     CUDA_ARCH="-gencode arch=compute_53,code=sm_53" ;;
-            8_*|9_*) CUDA_ARCH="-gencode arch=compute_53,code=sm_53 -gencode arch=compute_62,code=sm_62" ;;
-            10_*)    CUDA_ARCH="-gencode arch=compute_53,code=sm_53 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_72,code=sm_72" ;;
+            #7_*) CUDA_ARCH="-gencode arch=compute_53,code=sm_53" ;;
+            #8_*) CUDA_ARCH="-gencode arch=compute_53,code=sm_53 -gencode arch=compute_62,code=sm_62" ;;
+            9_*) CUDA_ARCH="-gencode arch=compute_53,code=sm_53 -gencode arch=compute_62,code=sm_62" ;;
+            10_*|11_*) CUDA_ARCH="-gencode arch=compute_53,code=sm_53 -gencode arch=compute_62,code=sm_62 -gencode arch=compute_72,code=sm_72" ;;
             *) echo "Unsupported CUDA_VERSION (CUDA_VERSION=$CUDA_VERSION), please report it to Kaldi mailing list, together with 'nvcc -h' or 'ptxas -h' which lists allowed -gencode values..."; exit 1 ;;
           esac
         ;;
-        *) echo "Unsupported architecture for use of Kaldi with CUDA.  Please report it to Kaldi mailing list."; exit 1 ;;
+        *) echo "Unsupported architecture for use of Kaldi with CUDA. Please let us know by opening a bug at:
+    https://github.com/kaldi-asr/kaldi/issues/new?template=bug_report.md&title=Unsupported+CUDA+platform+[FILLPLATFORMNAME]"
+           exit 1
       esac
     fi
 
@@ -504,9 +597,11 @@ function configure_cuda {
     echo "# CUDA configuration" >> kaldi.mk
     echo >> kaldi.mk
 
+    echo IS_GPU_BUILD = true >> kaldi.mk
     echo CUDA = true >> kaldi.mk
     echo CUDATKDIR = $CUDATKDIR >> kaldi.mk
     echo "CUDA_ARCH = $CUDA_ARCH" >> kaldi.mk
+    echo "HOST_ARCH = `uname -m`" >> kaldi.mk
     echo >> kaldi.mk
 
     # 64bit/32bit? We do not support cross compilation with CUDA so, use direct
@@ -746,6 +841,7 @@ debug_level=1
 double_precision=false
 dynamic_kaldi=false
 use_cuda=true
+use_rocm=false
 with_cudadecoder=1
 static_fst=false
 static_math=false
@@ -812,6 +908,12 @@ do
     threaded_atlas=false;
     mkl_threading=sequential
     shift ;;
+  --use-rocm)
+    use_rocm=true;
+    shift ;;
+  --use-rocm=no)
+    use_rocm=false;
+    shift ;;
   --use-cuda)
     use_cuda=true;
     shift ;;
@@ -822,13 +924,13 @@ do
     use_cuda=false;
     shift ;;
   --with-cudadecoder)
-    with_cudadecoder=1;
+    with_cudadecoder=true;
     shift ;;
   --with-cudadecoder=yes)
-    with_cudadecoder=1;
+    with_cudadecoder=true;
     shift ;;
   --with-cudadecoder=no)
-    with_cudadecoder=0;
+    with_cudadecoder=false;
     shift ;;
   --static-math)
     static_math=true;
@@ -888,6 +990,13 @@ do
     shift ;;
   --mathlib=*)
     GetSwitchValueOrDie MATHLIB "$1"
+    shift ;;
+  --rocm-dir=*)
+    # ROCM is used in src/cudamatrix and src/nnet{,bin} only.
+    GetSwitchExistingPathOrDie ROCMDIR "$1"
+    shift ;;
+  --rocm-targets=*)
+    GetSwitchValueOrDie ROCM_TARGETS "$1"
     shift ;;
   --cudatk-dir=*)
     # CUDA is used in src/cudamatrix and src/nnet{,bin} only.
@@ -1048,6 +1157,10 @@ echo >> kaldi.mk
 echo "Checking compiler $CXX ..."
 check_compiler $CXX
 
+echo "# Target achitecture" >> kaldi.mk
+echo "ARCH = $TARGET_ARCH" >> kaldi.mk
+echo >> kaldi.mk
+
 echo "# Base configuration" >> kaldi.mk
 echo >> kaldi.mk
 if $dynamic_kaldi ; then
@@ -1093,16 +1206,24 @@ echo "OPENFSTLIBS = $OPENFSTLIBS" >> kaldi.mk
 echo "OPENFSTLDFLAGS = $OPENFSTLDFLAGS" >> kaldi.mk
 echo >> kaldi.mk
 
-$use_cuda && echo "Checking cub library in $CUBROOT ..."
-if [[ "$use_cuda" = true  && ! -f $CUBROOT/cub/cub.cuh ]]; then
-  failure "Could not find file $CUBROOT/cub/cub.cuh:
+if $use_cuda; then
+   echo "Checking cub library in $CUBROOT ..."
+   if [[ ! -f $CUBROOT/cub/cub.cuh ]]; then
+     failure "Could not find file $CUBROOT/cub/cub.cuh:
   you may not have installed cub.  Go to ../tools/ and type
-  e.g. 'make cub'; cub is a new requirement."
+  'make cub' to download and unpack it. We'll detect it then."
+   else
+     echo "CUBROOT = $CUBROOT" >> kaldi.mk
+   fi
+   echo "WITH_CUDADECODER = $with_cudadecoder" >> kaldi.mk
 else
-  echo "CUBROOT = $CUBROOT" >> kaldi.mk
+   if $use_rocm; then
+     echo "WITH_CUDADECODER = $with_cudadecoder" >> kaldi.mk
+   else
+     echo "WITH_CUDADECODER = false" >> kaldi.mk
+   fi
 fi
 
-echo "WITH_CUDADECODER = $with_cudadecoder" >> kaldi.mk
 echo >> kaldi.mk
 
 # OS-specific steps given below append to kaldi.mk
@@ -1356,6 +1477,7 @@ elif [ "`uname`" == "Linux" ]; then
     failure "Unsupported linear algebra library '$MATHLIB'"
   fi
   $use_cuda && configure_cuda
+  $use_rocm && configure_rocm
   linux_configure_speex
 else
   failure "Could not detect the platform or we have not yet worked out the

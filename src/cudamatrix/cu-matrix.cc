@@ -27,8 +27,15 @@
 
 
 #if HAVE_CUDA == 1
+#ifdef __IS_HIP_COMPILE__
+#include <hip/hip_runtime_api.h>
+#include <hipblas/hipblas.h>
+
+#include "hipify.h"
+#else
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
+#endif
 #endif
 
 #include "base/timer.h"
@@ -243,7 +250,7 @@ void CuMatrixBase<Real>::CopyFromMat(const CuMatrixBase<OtherReal> &M,
       } else {
         // 2D thread block with warps (blockDim.x) along the row-dim of input M.
         // Each (8x32) thread block will transpose (32x32) data
-        const int32 warpSize = 32;
+        const int32 warpSize = GPU_WARP_SIZE;
         dim3 dimBlock(warpSize, CU1DBLOCK / warpSize);
         dim3 dimGrid(n_blocks(M.NumCols(), warpSize),
             n_blocks(M.NumRows(), warpSize));
@@ -849,7 +856,7 @@ void CuMatrixBase<Real>::DiffGroupPnorm(const CuMatrixBase<Real> &in_value,
 #if HAVE_CUDA == 1
   if (CuDevice::Instantiate().Enabled()) {
     CuTimer tim;
-    const int kWarpSize = 32;
+    const int kWarpSize = GPU_WARP_SIZE;
     dim3 dimBlock(kWarpSize, CU1DBLOCK / kWarpSize);
     dim3 dimGrid(n_blocks(NumCols(), dimBlock.x),
                  n_blocks(NumRows(), dimBlock.y));
@@ -999,7 +1006,7 @@ void CuMatrixBase<Real>::AddSmat(Real alpha, const CuSparseMatrix<Real> &A,
     // We use warpSize threads per row to access only the nonzero elements.
     // Every CU1DBLOCK/warpSize rows share one thread block.
     // 1D grid to cover all rows of A.
-    const int warpSize = 32;
+    const int warpSize = GPU_WARP_SIZE;
     dim3 dimBlock(warpSize, CU1DBLOCK / warpSize);
     dim3 dimGrid(n_blocks(A.NumRows(), dimBlock.y));
 
@@ -1096,14 +1103,26 @@ void CuMatrixBase<Real>::AddMatSmat(Real alpha, const CuMatrixBase<Real> &A,
 
     cusparseMatDescr_t descr;
     CUSPARSE_SAFE_CALL(cusparseCreateMatDescr(&descr));
-    CU_SAFE_CALL(
-        cusparse_csrmm(
-            GetCusparseHandle(),
-            transB == kNoTrans ?
-                CUSPARSE_OPERATION_TRANSPOSE : CUSPARSE_OPERATION_NON_TRANSPOSE,
-            B.NumRows(), NumRows(), B.NumCols(), B.NumElements(), &alpha, descr,
-            B.CsrVal(), B.CsrRowPtr(), B.CsrColIdx(), A.Data(), A.Stride(),
-            &beta, Data(), Stride()));
+    if (transB == kTrans) {
+      CU_SAFE_CALL(
+        cusparse_csrmm2(
+	    GetCusparseHandle(),
+	    CUSPARSE_OPERATION_NON_TRANSPOSE,
+	    CUSPARSE_OPERATION_NON_TRANSPOSE,
+	    B.NumRows(), NumRows(), B.NumCols(), B.NumElements(), &alpha, descr,
+	    B.CsrVal(), B.CsrRowPtr(), B.CsrColIdx(), A.Data(), A.Stride(),
+	    &beta, Data(), Stride()));
+    } else {
+      CuSparseMatrix<Real> BT(B, kTrans);
+      CU_SAFE_CALL(
+        cusparse_csrmm2(
+	    GetCusparseHandle(),
+	    CUSPARSE_OPERATION_NON_TRANSPOSE,
+	    CUSPARSE_OPERATION_NON_TRANSPOSE,
+	    BT.NumRows(), NumRows(), BT.NumCols(), BT.NumElements(), &alpha, descr,
+	    BT.CsrVal(), BT.CsrRowPtr(), BT.CsrColIdx(), A.Data(), A.Stride(),
+	    &beta, Data(), Stride()));
+    }
     CUSPARSE_SAFE_CALL(cusparseDestroyMatDescr(descr));
 
     CuDevice::Instantiate().AccuProfile(__func__, tim);
@@ -2164,7 +2183,7 @@ Real TraceMatMat(const CuMatrixBase<Real> &A,
     // if the matrix is not in a very bad shape.
     // (wider or taller than 32x8192)
     // CPU will then reduce to 1 element.
-    const int kWarpSize = 32;
+    const int kWarpSize = GPU_WARP_SIZE;
     dim3 dimBlock(kWarpSize, CU1DBLOCK / kWarpSize);
     dim3 dimGrid(n_blocks(A.NumCols(), kWarpSize),
         n_blocks(A.NumRows(), kWarpSize));
@@ -2386,7 +2405,7 @@ void CuMatrixBase<Real>::CopyColsFromVec(const CuVectorBase<Real> &rv) {
       // and use transposed copy to fill *this
       // see CuMatrixBase<Real>::CopyFromMat() for more detail of the impl
       MatrixDim rv_dim = { num_cols_, num_rows_, num_rows_ };
-      const int32 warpSize = 32;
+      const int32 warpSize = GPU_WARP_SIZE;
       dim3 dimBlock(warpSize, CU1DBLOCK / warpSize);
       dim3 dimGrid(n_blocks(rv_dim.cols, warpSize),
                    n_blocks(rv_dim.rows, warpSize));
@@ -2396,7 +2415,7 @@ void CuMatrixBase<Real>::CopyColsFromVec(const CuVectorBase<Real> &rv) {
     } else if (rv.Dim() == num_rows_) {
       // use 2D block (8x32) and large enough grid to cover matrix *this
       // dimBlock.x need to be at least warpSize for coalesced memory access.
-      const int32 warpSize = 32;
+      const int32 warpSize = GPU_WARP_SIZE;
       dim3 dimBlock(warpSize, CU1DBLOCK / warpSize);
       dim3 dimGrid(n_blocks(num_cols_, dimBlock.x),
                    n_blocks(num_rows_, dimBlock.y));
