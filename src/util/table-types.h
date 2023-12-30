@@ -71,20 +71,6 @@ typedef SequentialTableReader<KaldiObjectHolder<Vector<double> > >
 typedef RandomAccessTableReader<KaldiObjectHolder<Vector<double> > >
                                 RandomAccessDoubleVectorReader;
 
-typedef TableWriter<KaldiObjectHolder<NumpyArray<BaseFloat>>>
-                                      BaseFloatNumpyArrayWriter;
-typedef SequentialTableReader<KaldiObjectHolder<NumpyArray<BaseFloat>>>
-                              SequentialBaseFloatNumpyArrayReader;
-typedef RandomAccessTableReader<KaldiObjectHolder<NumpyArray<BaseFloat>>>
-                                RandomAccessBaseFloatNumpyArrayReader;
-
-typedef TableWriter<KaldiObjectHolder<NumpyArray<double>>>
-                                      DoubleNumpyArrayWriter;
-typedef SequentialTableReader<KaldiObjectHolder<NumpyArray<double>>>
-                              SequentialDoubleNumpyArrayReader;
-typedef RandomAccessTableReader<KaldiObjectHolder<NumpyArray<double>>>
-                                RandomAccessDoubleNumpyArrayReader;
-
 typedef TableWriter<KaldiObjectHolder<CuMatrix<BaseFloat> > >
                                       BaseFloatCuMatrixWriter;
 typedef SequentialTableReader<KaldiObjectHolder<CuMatrix<BaseFloat> > >
